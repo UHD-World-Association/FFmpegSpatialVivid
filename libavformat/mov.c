@@ -86,6 +86,8 @@ typedef struct MOVParseTableEntry {
 static int mov_read_default(MOVContext *c, AVIOContext *pb, MOVAtom atom);
 static int mov_read_mfra(MOVContext *c, AVIOContext *f);
 static void mov_free_stream_context(AVFormatContext *s, AVStream *st);
+static int save_last_idat(MOVContext *c, AVIOContext *pb);
+
 
 static int mov_metadata_track_or_disc_number(MOVContext *c, AVIOContext *pb,
                                              unsigned len, const char *key)
@@ -8803,7 +8805,47 @@ static int mov_read_pitm(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 
 static int mov_read_idat(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 {
+    AVFormatContext *s = c->fc;
+    static int count = 0;
+
+    count++;
+    printf("In func %s line %d,count=%d\n",__func__,__LINE__,count);
+
     c->idat_offset = avio_tell(pb);
+    int64_t box_start = avio_tell(pb) - 8;  // box start position
+    int64_t data_start = avio_tell(pb);     // data start position
+    uint32_t data_size = atom.size - 8;     // data size
+
+    av_log(s, AV_LOG_DEBUG, "found idat box[%d]: offset=%"PRId64", size=%"PRId64"\n",
+           c->idat_count, box_start, atom.size);
+
+    // extend idat array capacity
+    if (c->idat_count >= c->idat_capacity) {
+        int new_capacity = c->idat_capacity ? c->idat_capacity * 2 : 4;
+        IDATInfo *new_boxes = av_realloc_array(c->idat_boxes,
+                                               new_capacity,
+                                               sizeof(IDATInfo));
+        if (!new_boxes) {
+            av_log(s, AV_LOG_ERROR, "can't allocate memory for  idat boxes info array\n");
+            avio_skip(pb, data_size);
+            return AVERROR(ENOMEM);
+        }
+        c->idat_boxes = new_boxes;
+        c->idat_capacity = new_capacity;
+    }
+
+    // record current idat info
+    IDATInfo *info = &c->idat_boxes[c->idat_count];
+    info->offset = box_start;
+    info->size = atom.size;
+    info->data_size = data_size;
+    info->data_offset = data_start;
+
+    c->idat_count++;
+
+    // skip data, temporary not read data
+    avio_skip(pb, data_size);
+
     return 0;
 }
 
@@ -9941,6 +9983,10 @@ static int mov_read_close(AVFormatContext *s)
         mov_free_stream_context(s, st);
     }
 
+    if (mov->idat_count > 0) {
+        save_last_idat(mov, s->pb);
+    }
+
     av_freep(&mov->dv_demux);
     avformat_free_context(mov->dv_fctx);
     mov->dv_fctx = NULL;
@@ -9982,6 +10028,9 @@ static int mov_read_close(AVFormatContext *s)
     av_freep(&mov->heif_grid);
     av_freep(&mov->thmb_item_id);
 
+    av_freep(&mov->idat_boxes);
+    mov->idat_count = 0;
+    mov->idat_capacity = 0;
     return 0;
 }
 
@@ -10600,6 +10649,10 @@ static int mov_read_header(AVFormatContext *s)
             mov->decryption_key_len, AES_CTR_KEY_SIZE);
         return AVERROR(EINVAL);
     }
+
+    mov->idat_boxes = NULL;
+    mov->idat_count = 0;
+    mov->idat_capacity = 0;
 
     mov->fc = s;
     mov->trak_index = -1;
@@ -11516,3 +11569,102 @@ const FFInputFormat ff_mov_demuxer = {
     .read_close     = mov_read_close,
     .read_seek      = mov_read_seek,
 };
+static int save_last_idat(MOVContext *c, AVIOContext *pb)
+{
+    AVFormatContext *s = c->fc;
+    IDATInfo *last_idat = &c->idat_boxes[c->idat_count - 1];
+    char filename[256];
+    FILE *file = NULL;
+    uint8_t *buffer = NULL;
+    int ret;
+
+    av_log(s, AV_LOG_INFO, "prepare to save last idat box[%d/%d]: "
+        "offset=%"PRId64", size=%u\n",
+    c->idat_count, c->idat_count,
+    last_idat->offset, last_idat->size);
+
+//check whether it is the last idat box (according to file size)
+    int64_t file_size = avio_size(pb);
+    int64_t expected_end = last_idat->offset + last_idat->size;
+
+    if (expected_end != file_size) {
+        av_log(s, AV_LOG_WARNING,
+            "idat is not last box: idat ended=%"PRId64", filesize=%"PRId64"\n",
+            expected_end, file_size);
+// Here can choose not to save or keep save
+    }
+
+    if (last_idat->data_size <= 0 || last_idat->data_size > (1024 * 1024 * 100)) {  // limit to 100MB
+        av_log(s, AV_LOG_ERROR, "invalid data size: %u\n", last_idat->data_size);
+        return AVERROR_INVALIDDATA;
+    }
+
+// allocate buffer
+    buffer = av_malloc(last_idat->data_size);
+    if (!buffer) {
+        av_log(s, AV_LOG_ERROR, "memory allocation failed\n");
+        return AVERROR(ENOMEM);
+    }
+
+// seek to data begin position
+    avio_seek(pb, last_idat->data_offset, SEEK_SET);
+
+// read data
+    ret = avio_read(pb, buffer, last_idat->data_size + 8); //must add 8 to read full glb data
+    if (ret != (last_idat->data_size + 8)) { //must add 8 to read full glb data
+        av_log(s, AV_LOG_ERROR, "read failed: expect %u, actual %d\n",
+        last_idat->data_size, ret);
+        av_free(buffer);
+        return ret < 0 ? ret : AVERROR_INVALIDDATA;
+    }
+
+// check whether it is  glb data （glb file starts with  "glTF")
+    int is_glb = 0;
+    if (last_idat->data_size >= 12) {
+// glb file start with "glTF" (ASCII)
+        if (buffer[0] == 'g' && buffer[1] == 'l' && buffer[2] == 'T' && buffer[3] == 'F') {
+            is_glb = 1;
+            av_log(s, AV_LOG_INFO, "glb data detected!!! (glTF format)\n");
+        }
+    }
+
+// only save glb data
+    if (!is_glb) {
+        av_log(s, AV_LOG_INFO, "skip idat box which doesn't contain glb data\n");
+        av_free(buffer);
+        return 0;
+    }
+
+// generate file name
+    if (s->url) {
+    const char *basename = strrchr(s->url, '/');
+    if (basename) basename++;
+    else basename = s->url;
+
+    char name_without_ext[256];
+    strncpy(name_without_ext, basename, sizeof(name_without_ext) - 1);
+    char *dot = strrchr(name_without_ext, '.');
+    if (dot) *dot = '\0';
+        snprintf(filename, sizeof(filename), "%s_last_idat.glb", name_without_ext);
+    } else {
+        snprintf(filename, sizeof(filename), "last_idat_%"PRId64".glb",
+        last_idat->offset);
+    }
+
+// save to file
+    file = fopen(filename, "wb");
+    if (!file) {
+        av_log(s, AV_LOG_ERROR, "can NOT creat file: %s\n", filename);
+        av_free(buffer);
+        return AVERROR(EIO);
+    }
+
+    fwrite(buffer, 1, last_idat->data_size + 8 , file); //must add 8 to read full glb data
+    fclose(file);
+
+    av_log(s, AV_LOG_INFO, "save glb data in last idat box saved in: %s (%u Bytes)\n",
+                            filename, last_idat->data_size);
+
+    av_free(buffer);
+    return 0;
+}
