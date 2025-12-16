@@ -138,6 +138,8 @@ static const AVClass mov_isobmff_muxer_class = {
 
 static int get_moov_size(AVFormatContext *s);
 static int mov_write_single_packet(AVFormatContext *s, AVPacket *pkt);
+int mux_glb_to_mp4(AVFormatContext *s, const char *glb_file);
+static void write_glb_meta(AVIOContext *pb, const char *name, const uint8_t *data, uint32_t size);
 
 static int utf8len(const uint8_t *b)
 {
@@ -6082,8 +6084,10 @@ static int mov_write_ftyp_tag(AVIOContext *pb, AVFormatContext *s)
         }
     }
 
-    if (mov->mode == MODE_MP4)
+    if (mov->mode == MODE_MP4){
         ffio_wfourcc(pb, "mp41");
+        ffio_wfourcc(pb, "glti");
+    }
 
     if (mov->flags & FF_MOV_FLAG_DASH && mov->flags & FF_MOV_FLAG_GLOBAL_SIDX)
         ffio_wfourcc(pb, "dash");
@@ -8652,6 +8656,8 @@ static int mov_write_trailer(AVFormatContext *s)
         } else {
             if ((res = mov_write_moov_tag(pb, mov, s)) < 0)
                 return res;
+            // Now write the 'meta' box at the end
+            mux_glb_to_mp4(s, s->glb_filename);  // Embed the GLB at the end of the file
         }
         res = 0;
     } else {
@@ -9066,4 +9072,244 @@ const FFOutputFormat ff_avif_muxer = {
     .p.priv_class      = &mov_avif_muxer_class,
     .flags_internal    = FF_OFMT_FLAG_ALLOW_FLUSH,
 };
+#endif
+
+// Function for muxing GLB to MP4
+int mux_glb_to_mp4(AVFormatContext *s, const char *glb_file) {
+    AVIOContext *pb = s->pb;
+    FILE *glb_file_ptr;
+    uint8_t *glb_data;
+    size_t glb_size;
+
+    // Open and read GLB data
+    glb_file_ptr = fopen(glb_file, "rb");
+    if (!glb_file_ptr) {
+        av_log(s, AV_LOG_ERROR, "Failed to open GLB file\n");
+        return AVERROR(errno);
+    }
+    fseek(glb_file_ptr, 0, SEEK_END);
+    glb_size = ftell(glb_file_ptr);
+    fseek(glb_file_ptr, 0, SEEK_SET);
+    glb_data = malloc(glb_size);
+    if (!glb_data) {
+        fclose(glb_file_ptr);
+        return AVERROR(ENOMEM);
+    }
+    fread(glb_data, 1, glb_size, glb_file_ptr);
+    fclose(glb_file_ptr);
+
+    // Write the standard MP4 file type box (ftyp) and other necessary boxes like 'moov', 'trak', etc.
+    // This should already be handled by FFmpeg when writing the header and media tracks.
+
+    // Now, at the end of the media data, write the meta box and embed the GLB data
+    //create_meta_box(pb, 1, glb_file, glb_data, glb_size);  // 'meta' box at the end
+    write_glb_meta(pb,glb_file, glb_data, glb_size);  // 'meta' box at the end
+
+    // Free the GLB data after embedding it
+    free(glb_data);
+
+    return 0;
+}
+
+// Function to create 'hdlr' box (Handler Reference Box)
+static void write_glb_hdlr(AVIOContext *pb)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);                 // size placeholder
+    ffio_wfourcc(pb, "hdlr");
+
+    avio_wb32(pb, 0);                 // version + flags
+    avio_wb32(pb, 0);                 // pre_defined
+    ffio_wfourcc(pb, "gltf");         // handler_type
+
+    avio_wb32(pb, 0);                 // reserved
+    avio_wb32(pb, 0);                 // reserved
+    avio_wb32(pb, 0);                 // reserved
+
+    avio_put_str(pb, "gltf");          //proper C-string (includes '\0')
+
+    update_size(pb, pos);
+}
+
+// Function to create 'iinf' box (Item Info Box)
+static void write_infe(AVIOContext *pb,
+                       uint16_t item_id,
+                       const char *item_name)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "infe");
+
+    /* FullBox: version = 0, flags = 0 */
+    avio_wb32(pb, 0x00000000);
+
+    avio_wb16(pb, item_id);
+    avio_wb16(pb, 0);  // item_protection_index
+
+    /* item_name */
+    avio_put_str(pb, item_name);
+
+    /* content_type */
+    avio_put_str(pb, "model/gltf-binary");
+
+    /* content_encoding */
+    avio_put_str(pb, "binary");
+
+    update_size(pb, pos);
+}
+
+static void write_iinf(AVIOContext *pb,
+                       uint16_t item_id,
+                       const char *item_name)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "iinf");
+
+    avio_wb32(pb, 0);   // version 0
+    avio_wb16(pb, 1);   // entry_count
+
+    write_infe(pb, item_id, item_name);
+
+    update_size(pb, pos);
+}
+
+// Function to create 'pitm' box (Primary Item Box)
+static void write_pitm(AVIOContext *pb, uint16_t item_id)
+{
+    avio_wb32(pb, 14);
+    ffio_wfourcc(pb, "pitm");
+    avio_wb32(pb, 0);        // version + flags
+    avio_wb16(pb, item_id);
+}
+
+// Function to create 'iloc' box (Item Location Box)
+#if 0
+static void write_iloc(AVIOContext *pb,
+                       uint16_t item_id,
+                       uint32_t extent_offset,
+                       uint32_t extent_length)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "iloc");
+
+    avio_wb32(pb, 0x01000000);   // version = 1, flags = 0
+
+    /* offset_size=4, length_size=4, base_offset_size=0 */
+    avio_w8(pb, 0x44);
+    avio_w8(pb, 0x00);
+
+    avio_wb16(pb, 1);            // item_count
+
+    avio_wb16(pb, item_id);
+    avio_wb16(pb, 0);            // construction_method
+    avio_wb16(pb, 0);            // data_reference_index
+
+    /* base_offset omitted because base_offset_size == 0 */
+
+    avio_wb16(pb, 1);            // extent_count
+    avio_wb32(pb, extent_offset);
+    avio_wb32(pb, extent_length);
+
+    update_size(pb, pos);
+}
+#else
+static void write_iloc(AVIOContext *pb,
+                       uint16_t item_id,
+                       uint32_t extent_length)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "iloc");
+
+    /* FullBox: version = 1, flags = 0 */
+    avio_wb32(pb, 0x01000000);
+
+    /*
+     * offset_size = 4
+     * length_size = 4
+     * base_offset_size = 4
+     * reserved = 0
+     */
+    avio_w8(pb, 0x44);
+    avio_w8(pb, 0x40);
+
+    avio_wb16(pb, 1);            // item_count
+
+    avio_wb16(pb, item_id);
+    avio_wb16(pb, 1);            // construction_method = 1 (idat-relative)
+    avio_wb16(pb, 0);            // data_reference_index
+
+    avio_wb32(pb, 0);            // base_offset = 0 
+
+    avio_wb16(pb, 1);            // extent_count
+    avio_wb32(pb, 0);            // extent_offset = 0
+    avio_wb32(pb, extent_length);
+
+    update_size(pb, pos);
+}
+
+#endif
+
+// Function to create 'idat' box (Item Data Box)
+static uint32_t write_idat(AVIOContext *pb, const uint8_t *data, uint32_t size)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, size + 8);
+    ffio_wfourcc(pb, "idat");
+    avio_write(pb, data, size);
+    return pos + 8;   // data offset
+}
+
+// Function to create 'meta' box (Meta Box)
+#if 0
+static void write_glb_meta(AVIOContext *pb,
+                           const char *name,
+                           const uint8_t *data,
+                           uint32_t size)
+{
+    int64_t meta_pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "meta");
+    avio_wb32(pb, 0); // version + flags
+
+    write_glb_hdlr(pb);
+
+    uint32_t idat_offset = avio_tell(pb) + 8 + 16 + 32; // safe calculation
+    write_iloc(pb, 1, idat_offset, size);
+    write_pitm(pb, 1);
+    write_iinf(pb, 1, name);
+    write_idat(pb, data, size);
+
+    update_size(pb, meta_pos);
+}
+#else
+static void write_glb_meta(AVIOContext *pb,
+                           const char *name,
+                           const uint8_t *data,
+                           uint32_t size)
+{
+    int64_t meta_pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "meta");
+    avio_wb32(pb, 0); // version + flags
+
+    write_glb_hdlr(pb);
+
+    /* iloc must appear before idat */
+    write_iloc(pb, 1, size);
+
+    write_pitm(pb, 1);
+    write_iinf(pb, 1, name);
+
+    /* idat immediately follows; construction_method=1 makes offsets relative */
+    avio_wb32(pb, size + 8);
+    ffio_wfourcc(pb, "idat");
+    avio_write(pb, data, size);
+
+    update_size(pb, meta_pos);
+}
+
+
 #endif

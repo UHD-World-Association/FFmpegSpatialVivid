@@ -133,6 +133,7 @@ static void uninit_options(OptionsContext *o)
     av_freep(&o->attachments);
 
     av_dict_free(&o->streamid);
+    av_freep(&o->glb_filename);
 }
 
 static void init_options(OptionsContext *o)
@@ -151,6 +152,7 @@ static void init_options(OptionsContext *o)
     o->input_sync_ref = -1;
     o->find_stream_info = 1;
     o->shortest_buf_duration = 10.f;
+    o->glb_filename = NULL;
 }
 
 static int show_hwaccels(void *optctx, const char *opt, const char *arg)

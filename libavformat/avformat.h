@@ -1333,6 +1333,8 @@ typedef struct AVFormatContext {
      */
     AVStream **streams;
 
+    char *glb_filename;
+
     /**
      * Number of elements in AVFormatContext.stream_groups.
      *
