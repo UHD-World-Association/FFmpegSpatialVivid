@@ -44,6 +44,7 @@
 #define MODE_ISM  0x40
 #define MODE_F4V  0x80
 #define MODE_AVIF 0x100
+#define MODE_HEIC 0x200
 
 typedef struct MOVIentry {
     uint64_t     pos;
@@ -265,6 +266,10 @@ typedef struct MOVMuxContext {
     int avif_extent_length[2];   // index 0 is YUV and 1 is Alpha.
     int is_animated_avif;
     int avif_loop_count;
+    uint8_t *heic_buf;
+    int heic_size;
+    uint8_t *heic_exif_data;
+    int heic_exif_size;
 } MOVMuxContext;
 
 #define FF_MOV_FLAG_RTP_HINT              (1 <<  0)

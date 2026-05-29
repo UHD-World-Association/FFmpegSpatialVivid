@@ -172,6 +172,8 @@ typedef struct OptionsContext {
     int input_sync_ref;
     int find_stream_info;
 
+    char *glb_filename;
+
     SpecifierOptList ts_scale;
     SpecifierOptList dump_attachment;
     SpecifierOptList hwaccels;

@@ -130,6 +130,7 @@ static const AVOption options[] = {
     { NULL },
 };
 
+
 static const AVClass mov_isobmff_muxer_class = {
     .class_name = "mov/mp4/tgp/psp/tg2/ipod/ismv/f4v muxer",
     .item_name  = av_default_item_name,
@@ -139,6 +140,8 @@ static const AVClass mov_isobmff_muxer_class = {
 
 static int get_moov_size(AVFormatContext *s);
 static int mov_write_single_packet(AVFormatContext *s, AVPacket *pkt);
+int mux_glb_to_mp4(AVFormatContext *s, const char *glb_file);
+static void write_glb_meta(AVIOContext *pb, const char *name, const uint8_t *data, uint32_t size);
 
 static int utf8len(const uint8_t *b)
 {
@@ -2618,11 +2621,11 @@ static int mov_write_colr_tag(AVIOContext *pb, MOVTrack *track, int prefer_icc)
 
     /* We should only ever be called for MOV, MP4 and AVIF. */
     av_assert0(track->mode == MODE_MOV || track->mode == MODE_MP4 ||
-               track->mode == MODE_AVIF);
+               track->mode == MODE_AVIF || track->mode == MODE_HEIC);
 
     avio_wb32(pb, 0); /* size */
     ffio_wfourcc(pb, "colr");
-    if (track->mode == MODE_MP4 || track->mode == MODE_AVIF)
+    if (track->mode == MODE_MP4 || track->mode == MODE_AVIF || track->mode == MODE_HEIC)
         ffio_wfourcc(pb, "nclx");
     else
         ffio_wfourcc(pb, "nclc");
@@ -2632,7 +2635,7 @@ static int mov_write_colr_tag(AVIOContext *pb, MOVTrack *track, int prefer_icc)
     avio_wb16(pb, track->par->color_primaries);
     avio_wb16(pb, track->par->color_trc);
     avio_wb16(pb, track->par->color_space);
-    if (track->mode == MODE_MP4 || track->mode == MODE_AVIF) {
+    if (track->mode == MODE_MP4 || track->mode == MODE_AVIF || track->mode == MODE_HEIC) {
         int full_range = track->par->color_range == AVCOL_RANGE_JPEG;
         avio_w8(pb, full_range << 7);
     }
@@ -3555,7 +3558,7 @@ static int mov_write_hdlr_tag(AVFormatContext *s, AVIOContext *pb, MOVTrack *tra
     if (track) {
         hdlr = (track->mode == MODE_MOV) ? "mhlr" : "\0\0\0\0";
         if (track->par->codec_type == AVMEDIA_TYPE_VIDEO) {
-            if (track->mode == MODE_AVIF) {
+            if (track->mode == MODE_AVIF || track->mode == MODE_HEIC) {
                 hdlr_type = (track == &mov->tracks[0]) ? "pict" : "auxv";
                 descr     = "PictureHandler";
             } else {
@@ -3628,6 +3631,7 @@ static int mov_write_hdlr_tag(AVFormatContext *s, AVIOContext *pb, MOVTrack *tra
 
 static int mov_write_pitm_tag(AVIOContext *pb, int item_id)
 {
+
     int64_t pos = avio_tell(pb);
     avio_wb32(pb, 0); /* size */
     ffio_wfourcc(pb, "pitm");
@@ -3638,6 +3642,7 @@ static int mov_write_pitm_tag(AVIOContext *pb, int item_id)
 
 static int mov_write_iloc_tag(AVIOContext *pb, MOVMuxContext *mov, AVFormatContext *s)
 {
+
     int64_t pos = avio_tell(pb);
     avio_wb32(pb, 0); /* size */
     ffio_wfourcc(pb, "iloc");
@@ -3661,6 +3666,7 @@ static int mov_write_iloc_tag(AVIOContext *pb, MOVMuxContext *mov, AVFormatConte
 
 static int mov_write_iinf_tag(AVIOContext *pb, MOVMuxContext *mov, AVFormatContext *s)
 {
+
     int64_t iinf_pos = avio_tell(pb);
     avio_wb32(pb, 0); /* size */
     ffio_wfourcc(pb, "iinf");
@@ -3688,6 +3694,8 @@ static int mov_write_iref_tag(AVIOContext *pb, MOVMuxContext *mov, AVFormatConte
 {
     int64_t auxl_pos;
     int64_t iref_pos = avio_tell(pb);
+
+
     avio_wb32(pb, 0); /* size */
     ffio_wfourcc(pb, "iref");
     avio_wb32(pb, 0); /* Version & flags */
@@ -3739,7 +3747,10 @@ static int mov_write_ipco_tag(AVIOContext *pb, MOVMuxContext *mov, AVFormatConte
     for (int i = 0; i < mov->nb_streams; i++) {
         mov_write_ispe_tag(pb, mov, s, i);
         mov_write_pixi_tag(pb, mov, s, i);
-        mov_write_av1c_tag(pb, &mov->tracks[i]);
+        if (mov->tracks[i].par->codec_id == AV_CODEC_ID_HEVC)
+            mov_write_hvcc_tag(s, pb, &mov->tracks[i]);
+        else
+            mov_write_av1c_tag(pb, &mov->tracks[i]);
         if (!i)
             mov_write_colr_tag(pb, &mov->tracks[0], 0);
         else
@@ -4882,6 +4893,8 @@ static int mov_write_meta_tag(AVIOContext *pb, MOVMuxContext *mov,
 {
     int size = 0;
     int64_t pos = avio_tell(pb);
+
+
     avio_wb32(pb, 0); /* size */
     ffio_wfourcc(pb, "meta");
     avio_wb32(pb, 0);
@@ -5000,6 +5013,7 @@ static int mov_write_udta_tag(AVIOContext *pb, MOVMuxContext *mov,
     AVIOContext *pb_buf;
     int ret, size;
     uint8_t *buf;
+
 
     ret = avio_open_dyn_buf(&pb_buf);
     if (ret < 0)
@@ -5220,6 +5234,8 @@ static int mov_write_moov_tag(AVIOContext *pb, MOVMuxContext *mov,
 {
     int i;
     int64_t pos = avio_tell(pb);
+
+
     avio_wb32(pb, 0); /* size placeholder*/
     ffio_wfourcc(pb, "moov");
 
@@ -5293,8 +5309,9 @@ static int mov_write_moov_tag(AVIOContext *pb, MOVMuxContext *mov,
 
     if (mov->mode == MODE_PSP)
         mov_write_uuidusmt_tag(pb, s);
-    else if (mov->mode != MODE_AVIF)
+    else if (mov->mode != MODE_AVIF){
         mov_write_udta_tag(pb, mov, s);
+    }
     for (i = 0; i < mov->nb_streams; i++)
         mov_write_pssh_tag(pb, mov->tracks[i].st);
 
@@ -6028,6 +6045,7 @@ done_mfra:
 
 static int mov_write_mdat_tag(AVIOContext *pb, MOVMuxContext *mov)
 {
+
     avio_wb32(pb, 8);    // placeholder for extended size field (64 bit)
     ffio_wfourcc(pb, mov->mode == MODE_MOV ? "wide" : "free");
 
@@ -6084,6 +6102,17 @@ static int mov_write_ftyp_tag(AVIOContext *pb, AVFormatContext *s)
     int64_t pos = avio_tell(pb);
     int has_h264 = 0, has_av1 = 0, has_video = 0, has_dolby = 0, has_id3 = 0;
     int has_iamf = 0;
+
+    if (mov->mode == MODE_HEIC) {
+        avio_wb32(pb, 0);           // size placeholder
+        ffio_wfourcc(pb, "ftyp");
+        ffio_wfourcc(pb, "heic");   // major_brand
+        avio_wb32(pb, 0);           // minor_version
+        ffio_wfourcc(pb, "mif1");
+        ffio_wfourcc(pb, "heic");
+        ffio_wfourcc(pb, "glti");   // 3DGS glTF brand
+        return update_size(pb, pos);
+    }
 
 #if CONFIG_IAMFENC
     for (int i = 0; i < s->nb_stream_groups; i++) {
@@ -6188,8 +6217,11 @@ static int mov_write_ftyp_tag(AVIOContext *pb, AVFormatContext *s)
         }
     }
 
-    if (mov->mode == MODE_MP4)
+    if (mov->mode == MODE_MP4){
         ffio_wfourcc(pb, "mp41");
+        ffio_wfourcc(pb, "glti");
+    }
+
 
     if (mov->flags & FF_MOV_FLAG_DASH && mov->flags & FF_MOV_FLAG_GLOBAL_SIDX)
         ffio_wfourcc(pb, "dash");
@@ -7415,6 +7447,28 @@ static int mov_write_packet(AVFormatContext *s, AVPacket *pkt)
     MOVMuxContext *mov = s->priv_data;
     MOVTrack *trk;
 
+    if (mov->mode == MODE_HEIC) {
+        mov->heic_buf = av_malloc(pkt->size);
+        memcpy(mov->heic_buf, pkt->data, pkt->size);
+        mov->heic_size = pkt->size;
+        // Capture EXIF side data from codec parameters
+        if (s->streams[pkt->stream_index]->codecpar->nb_coded_side_data > 0) {
+            for (int i = 0; i < s->streams[pkt->stream_index]->codecpar->nb_coded_side_data; i++) {
+                const AVPacketSideData *sd =
+                    av_packet_side_data_get(s->streams[pkt->stream_index]->codecpar->coded_side_data,
+                                            s->streams[pkt->stream_index]->codecpar->nb_coded_side_data,
+                                            AV_PKT_DATA_EXIF);
+                if (sd) {
+                    mov->heic_exif_data = av_malloc(sd->size);
+                    memcpy(mov->heic_exif_data, sd->data, sd->size);
+                    mov->heic_exif_size = sd->size;
+                    break;
+                }
+            }
+        }
+        return 0;
+    }
+
     if (!pkt) {
         mov_flush_fragment(s, 1);
         return 1;
@@ -7807,6 +7861,8 @@ static void mov_free(AVFormatContext *s)
 
     av_freep(&mov->tracks);
     ffio_free_dyn_buf(&mov->mdat_buf);
+    av_freep(&mov->heic_buf);
+    av_freep(&mov->heic_exif_data);
 }
 
 static uint32_t rgb_to_yuv(uint32_t rgb)
@@ -7980,7 +8036,7 @@ static int mov_init(AVFormatContext *s)
     if (mov->flags & FF_MOV_FLAG_DELAY_MOOV)
         mov->flags |= FF_MOV_FLAG_EMPTY_MOOV;
 
-    if (mov->mode == MODE_AVIF)
+    if (mov->mode == MODE_AVIF || mov->mode == MODE_HEIC)
         mov->flags |= FF_MOV_FLAG_DELAY_MOOV;
 
     /* Set the FRAGMENT flag if any of the fragmentation methods are
@@ -8065,7 +8121,7 @@ static int mov_init(AVFormatContext *s)
      * is enabled, we don't support non-seekable output at all. */
     if (!(s->pb->seekable & AVIO_SEEKABLE_NORMAL) &&
         (!(mov->flags & FF_MOV_FLAG_FRAGMENT) || mov->ism_lookahead ||
-         mov->mode == MODE_AVIF)) {
+         mov->mode == MODE_AVIF || mov->mode == MODE_HEIC)) {
         av_log(s, AV_LOG_ERROR, "muxer does not support non seekable output\n");
         return AVERROR(EINVAL);
     }
@@ -8326,8 +8382,9 @@ static int mov_init(AVFormatContext *s)
                 av_log(s, AV_LOG_ERROR, "%s only supported in MP4.\n", avcodec_get_name(track->par->codec_id));
                 return AVERROR(EINVAL);
             } else if (track->par->codec_id == AV_CODEC_ID_AV1 &&
-                       track->mode != MODE_MP4 && track->mode != MODE_AVIF) {
-                av_log(s, AV_LOG_ERROR, "%s only supported in MP4 and AVIF.\n", avcodec_get_name(track->par->codec_id));
+                       track->mode != MODE_MP4 && track->mode != MODE_AVIF &&
+                       track->mode != MODE_HEIC) {
+                av_log(s, AV_LOG_ERROR, "%s only supported in MP4, AVIF and HEIC.\n", avcodec_get_name(track->par->codec_id));
                 return AVERROR(EINVAL);
             } else if (track->par->codec_id == AV_CODEC_ID_VP8) {
                 /* altref frames handling is not defined in the spec as of version v1.0,
@@ -8472,6 +8529,19 @@ static int mov_init(AVFormatContext *s)
     return 0;
 }
 
+static int heic_init(AVFormatContext *s)
+{
+    MOVMuxContext *mov = s->priv_data;
+    int ret = mov_init(s);
+    if (ret < 0)
+        return ret;
+    mov->mode = MODE_HEIC;
+    mov->flags |= FF_MOV_FLAG_DELAY_MOOV;
+    for (int i = 0; i < mov->nb_tracks; i++)
+        mov->tracks[i].mode = MODE_HEIC;
+    return 0;
+}
+
 static int mov_write_header(AVFormatContext *s)
 {
     AVIOContext *pb = s->pb;
@@ -8588,7 +8658,7 @@ static int mov_write_header(AVFormatContext *s)
                 return ret;
             update_size(pb, mov->mdat_pos);
         }
-    } else if (mov->mode != MODE_AVIF) {
+    } else if (mov->mode != MODE_AVIF && mov->mode != MODE_HEIC) {
         if (mov->flags & FF_MOV_FLAG_FASTSTART)
             mov->reserved_header_pos = avio_tell(pb);
         mov_write_mdat_tag(pb, mov);
@@ -8772,6 +8842,275 @@ static int mov_write_trailer(AVFormatContext *s)
      * Before actually writing the trailer, make sure that there are no
      * dangling subtitles, that need a terminating sample.
      */
+
+    if (mov->mode == MODE_HEIC) {
+        uint8_t *glb_data = NULL;
+        size_t glb_size = 0;
+        const char *glb_name = NULL;
+        int has_glb = 0;
+        int has_exif = mov->heic_exif_data != NULL;
+        int image_item_id = 1;
+        int glb_item_id = 2;
+        int exif_item_id = 0;
+        int item_count = 1;
+        int64_t idat_data_pos = 0;   // file position of idat payload data start
+
+        // Read GLB file if specified
+        if (s->glb_filename) {
+            FILE *f = fopen(s->glb_filename, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                glb_size = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                glb_data = av_malloc(glb_size);
+                if (glb_data) {
+                    if (fread(glb_data, 1, glb_size, f) != glb_size)
+                        av_log(s, AV_LOG_WARNING, "Short read from GLB file\n");
+                    has_glb = 1;
+                }
+                fclose(f);
+                // Extract base filename for item_name
+                glb_name = strrchr(s->glb_filename, '/');
+                glb_name = glb_name ? glb_name + 1 : s->glb_filename;
+            } else {
+                av_log(s, AV_LOG_WARNING, "Failed to open GLB file: %s\n",
+                       s->glb_filename);
+            }
+        }
+
+        item_count = 1 + has_glb + has_exif;
+        exif_item_id = has_glb ? 3 : 2;
+
+        // Write ftyp
+        mov_write_ftyp_tag(pb, s);
+
+        // --- Write meta box first (mdat goes after, like AVIF) ---
+        int64_t meta_pos = avio_tell(pb);
+        avio_wb32(pb, 0); // meta size placeholder
+        ffio_wfourcc(pb, "meta");
+        avio_wb32(pb, 0); // version + flags
+
+        // hdlr - handler_type 'pict' for HEIF (uses track[0] for proper handler)
+        mov_write_hdlr_tag(s, pb, &mov->tracks[0]);
+
+        // pitm - primary item is the image (item_id=1)
+        mov_write_pitm_tag(pb, image_item_id);
+
+        // iloc - version 0 (file-absolute offsets, matching Python reference)
+        // Record positions of each extent_offset for later fixup
+        int64_t image_extent_off_pos = 0;
+        int64_t glb_extent_off_pos = 0;
+        int64_t exif_extent_off_pos = 0;
+        {
+            int64_t iloc_pos = avio_tell(pb);
+            avio_wb32(pb, 0);
+            ffio_wfourcc(pb, "iloc");
+            avio_wb32(pb, 0);             // version=0, flags=0
+            avio_w8(pb, (4 << 4) + 4);    // offset_size=4, length_size=4
+            avio_w8(pb, (4 << 4) + 0);    // base_offset_size=4, reserved=0
+            avio_wb16(pb, item_count);    // item_count
+
+            // Image item (item_id=1)
+            avio_wb16(pb, image_item_id);
+            avio_wb16(pb, 0);             // data_reference_index
+            avio_wb32(pb, 0);             // base_offset
+            avio_wb16(pb, 1);             // extent_count
+            image_extent_off_pos = avio_tell(pb);
+            avio_wb32(pb, 0);             // extent_offset placeholder
+            avio_wb32(pb, mov->heic_size);// extent_length
+
+            // GLB item (item_id=2)
+            if (has_glb) {
+                avio_wb16(pb, glb_item_id);
+                avio_wb16(pb, 0);         // data_reference_index
+                avio_wb32(pb, 0);         // base_offset
+                avio_wb16(pb, 1);         // extent_count
+                glb_extent_off_pos = avio_tell(pb);
+                avio_wb32(pb, 0);         // extent_offset placeholder
+                avio_wb32(pb, glb_size);  // extent_length
+            }
+
+            // EXIF item
+            if (has_exif) {
+                avio_wb16(pb, exif_item_id);
+                avio_wb16(pb, 0);         // data_reference_index
+                avio_wb32(pb, 0);         // base_offset
+                avio_wb16(pb, 1);         // extent_count
+                exif_extent_off_pos = avio_tell(pb);
+                avio_wb32(pb, 0);         // extent_offset placeholder
+                avio_wb32(pb, 130);       // extent_length (matches original format)
+            }
+
+            update_size(pb, iloc_pos);
+        }
+
+        // iinf
+        {
+            int64_t iinf_pos = avio_tell(pb);
+            avio_wb32(pb, 0);
+            ffio_wfourcc(pb, "iinf");
+            avio_wb32(pb, 0);            // version=0, flags=0
+            avio_wb16(pb, item_count);   // entry_count
+
+            // Image infe (item_id=1, version=2 with item_type)
+            {
+                int64_t infe_pos = avio_tell(pb);
+                avio_wb32(pb, 0);
+                ffio_wfourcc(pb, "infe");
+                avio_wb32(pb, 0x02000000); // version=2, flags=0
+                avio_wb16(pb, image_item_id);
+                avio_wb16(pb, 0);          // item_protection_index
+                // item_type from codec
+                if (mov->tracks[0].st && mov->tracks[0].st->codecpar) {
+                    if (mov->tracks[0].st->codecpar->codec_id == AV_CODEC_ID_HEVC)
+                        avio_write(pb, "hvc1", 4);
+                    else if (mov->tracks[0].st->codecpar->codec_id == AV_CODEC_ID_AV1)
+                        avio_write(pb, "av01", 4);
+                    else
+                        avio_write(pb, "????", 4);
+                } else {
+                    avio_write(pb, "hvc1", 4);
+                }
+                avio_put_str(pb, "Image"); // item_name
+                update_size(pb, infe_pos);
+            }
+
+            // GLB infe (item_id=2, version=0 with content_type)
+            if (has_glb) {
+                int64_t infe_pos = avio_tell(pb);
+                avio_wb32(pb, 0);
+                ffio_wfourcc(pb, "infe");
+                avio_wb32(pb, 0);          // version=0, flags=0
+                avio_wb16(pb, glb_item_id);
+                avio_wb16(pb, 0);          // item_protection_index
+                avio_put_str(pb, glb_name);// item_name
+                avio_put_str(pb, "model/gltf-binary"); // content_type
+                avio_put_str(pb, "binary");// content_encoding
+                update_size(pb, infe_pos);
+            }
+
+            // EXIF infe (version=2 with item_type='Exif')
+            if (has_exif) {
+                int64_t infe_pos = avio_tell(pb);
+                avio_wb32(pb, 0);
+                ffio_wfourcc(pb, "infe");
+                avio_wb32(pb, 0x02000000); // version=2, flags=0
+                avio_wb16(pb, exif_item_id);
+                avio_wb16(pb, 0);          // item_protection_index
+                avio_write(pb, "Exif", 4); // item_type
+                avio_put_str(pb, "Exif");  // item_name
+                update_size(pb, infe_pos);
+            }
+
+            update_size(pb, iinf_pos);
+        }
+
+        // idat - GLB data inside meta
+        if (has_glb) {
+            avio_wb32(pb, glb_size + 8);
+            ffio_wfourcc(pb, "idat");
+            idat_data_pos = avio_tell(pb);  // record where idat payload starts
+            avio_write(pb, glb_data, glb_size);
+            av_free(glb_data);
+            glb_data = NULL;
+        }
+
+        // iprp - image properties (ispe, pixi, codec config, colr)
+        mov_write_iprp_tag(pb, mov, s);
+
+        // iref - references between items
+        if (has_glb || has_exif) {
+            int64_t iref_pos = avio_tell(pb);
+            avio_wb32(pb, 0);
+            ffio_wfourcc(pb, "iref");
+            avio_wb32(pb, 0);            // version=0, flags=0
+
+            // auxl reference from GLB item to primary image
+            if (has_glb) {
+                int64_t auxl_pos = avio_tell(pb);
+                avio_wb32(pb, 0);
+                ffio_wfourcc(pb, "auxl");
+                avio_wb16(pb, glb_item_id);  // from_item_ID
+                avio_wb16(pb, 1);            // reference_count
+                avio_wb16(pb, image_item_id);// to_item_ID (primary image)
+                update_size(pb, auxl_pos);
+            }
+
+            // cdsc reference from image item to EXIF item
+            if (has_exif) {
+                int64_t cdsc_pos = avio_tell(pb);
+                avio_wb32(pb, 0);
+                ffio_wfourcc(pb, "cdsc");
+                avio_wb16(pb, image_item_id); // from_item_ID
+                avio_wb16(pb, 1);             // reference_count
+                avio_wb16(pb, exif_item_id);  // to_item_ID
+                update_size(pb, cdsc_pos);
+            }
+
+            update_size(pb, iref_pos);
+        }
+
+        // grpl - gltf group
+        if (has_glb) {
+            int64_t grpl_pos = avio_tell(pb);
+            avio_wb32(pb, 0);
+            ffio_wfourcc(pb, "grpl");
+            int64_t gltf_pos = avio_tell(pb);
+            avio_wb32(pb, 0);
+            ffio_wfourcc(pb, "gltf");
+            avio_wb32(pb, 0);            // version=0, flags=0
+            avio_wb32(pb, 100);          // group_id
+            avio_wb32(pb, 1);            // num_entities_in_group
+            avio_wb32(pb, glb_item_id);  // entity_id
+            update_size(pb, gltf_pos);
+            update_size(pb, grpl_pos);
+        }
+
+        // Finalize meta box size
+        update_size(pb, meta_pos);
+
+        // --- Write mdat AFTER meta ---
+        int64_t mdat_pos = avio_tell(pb);
+        int mdat_payload_size = mov->heic_size;
+        int exif_size = 0;
+        if (has_exif)
+            exif_size = 4 + 4 + 2 + mov->heic_exif_size; // tiff_offset(4)+'Exif'(4)+pad(2)+TIFF
+        mdat_payload_size += exif_size;
+        avio_wb32(pb, mdat_payload_size + 8);
+        ffio_wfourcc(pb, "mdat");
+        int64_t mdat_data_off = mdat_pos + 8;
+        avio_write(pb, mov->heic_buf, mov->heic_size);
+
+        // Write EXIF data (non-standard format matching original: tiff_offset(4) + 'Exif'(4) + pad(2) + TIFF)
+        if (has_exif) {
+            avio_wb32(pb, 6);           // tiff_header_offset
+            ffio_wfourcc(pb, "Exif");
+            avio_wb16(pb, 0);           // padding
+            avio_write(pb, mov->heic_exif_data, mov->heic_exif_size);
+        }
+
+        // Seek back and fix up extent_offsets in iloc
+        // Image extent_offset -> mdat data start
+        avio_seek(pb, image_extent_off_pos, SEEK_SET);
+        avio_wb32(pb, mdat_data_off);
+
+        // GLB extent_offset -> idat data start
+        if (has_glb) {
+            avio_seek(pb, glb_extent_off_pos, SEEK_SET);
+            avio_wb32(pb, idat_data_pos);
+        }
+
+        // EXIF extent_offset -> after HEVC data within mdat
+        if (has_exif) {
+            avio_seek(pb, exif_extent_off_pos, SEEK_SET);
+            avio_wb32(pb, mdat_data_off + mov->heic_size);
+        }
+
+        avio_seek(pb, 0, SEEK_END);
+
+        return 0;
+    }
+
     for (i = 0; i < mov->nb_tracks; i++) {
         MOVTrack *trk = &mov->tracks[i];
         if (trk->par->codec_id == AV_CODEC_ID_MOV_TEXT &&
@@ -8848,6 +9187,8 @@ static int mov_write_trailer(AVFormatContext *s)
         } else {
             if ((res = mov_write_moov_tag(pb, mov, s)) < 0)
                 return res;
+            // Now write the 'meta' box at the end
+            mux_glb_to_mp4(s, s->glb_filename);  // Embed the GLB at the end of the file
         }
 
         if (mov->flags & FF_MOV_FLAG_HYBRID_FRAGMENTED) {
@@ -9076,6 +9417,14 @@ static const AVCodecTag codec_avif_tags[] = {
 };
 static const AVCodecTag *const codec_avif_tags_list[] = { codec_avif_tags, NULL };
 
+static const AVCodecTag codec_heic_tags[] = {
+    { AV_CODEC_ID_HEVC,    MKTAG('h','v','c','1') },
+    { AV_CODEC_ID_HEVC,    MKTAG('h','e','v','1') },
+    { AV_CODEC_ID_AV1,     MKTAG('a','v','0','1') },
+    { AV_CODEC_ID_NONE, 0 },
+};
+static const AVCodecTag *const codec_heic_tags_list[] = { codec_heic_tags, NULL };
+
 static const AVClass mov_avif_muxer_class = {
     .class_name = "avif muxer",
     .item_name  = av_default_item_name,
@@ -9273,3 +9622,202 @@ const FFOutputFormat ff_avif_muxer = {
     .flags_internal    = FF_OFMT_FLAG_ALLOW_FLUSH,
 };
 #endif
+
+#if CONFIG_HEIC_MUXER
+const FFOutputFormat ff_heic_muxer = {
+    .p.name            = "heic",
+    .p.long_name       = NULL_IF_CONFIG_SMALL("HEIC"),
+    .p.mime_type       = "image/heic",
+    .p.extensions      = "heic",
+    .priv_data_size    = sizeof(MOVMuxContext),
+    .p.video_codec     = AV_CODEC_ID_HEVC,
+    .init              = heic_init,
+    .write_header      = mov_write_header,
+    .write_packet      = mov_write_packet,
+    .write_trailer     = mov_write_trailer,
+    .deinit            = mov_free,
+    .p.flags           = AVFMT_GLOBALHEADER,
+    .p.codec_tag       = codec_heic_tags_list,
+    .p.priv_class      = &mov_avif_muxer_class,
+    .flags_internal    = FF_OFMT_FLAG_ALLOW_FLUSH,
+};
+#endif
+
+// Function for muxing GLB to MP4
+int mux_glb_to_mp4(AVFormatContext *s, const char *glb_file) {
+    AVIOContext *pb = s->pb;
+    FILE *glb_file_ptr;
+    uint8_t *glb_data;
+    size_t glb_size;
+
+    // Open and read GLB data
+    glb_file_ptr = fopen(glb_file, "rb");
+    if (!glb_file_ptr) {
+        av_log(s, AV_LOG_ERROR, "Failed to open GLB file\n");
+        return AVERROR(errno);
+    }
+    fseek(glb_file_ptr, 0, SEEK_END);
+    glb_size = ftell(glb_file_ptr);
+    fseek(glb_file_ptr, 0, SEEK_SET);
+    glb_data = malloc(glb_size);
+    if (!glb_data) {
+        fclose(glb_file_ptr);
+        return AVERROR(ENOMEM);
+    }
+    if (fread(glb_data, 1, glb_size, glb_file_ptr) != glb_size)
+        av_log(s, AV_LOG_WARNING, "Short read from GLB file\n");
+    fclose(glb_file_ptr);
+
+    // Write the standard MP4 file type box (ftyp) and other necessary boxes like 'moov', 'trak', etc.
+    // This should already be handled by FFmpeg when writing the header and media tracks.
+
+    // Now, at the end of the media data, write the meta box and embed the GLB data
+    //create_meta_box(pb, 1, glb_file, glb_data, glb_size);  // 'meta' box at the end
+    write_glb_meta(pb,glb_file, glb_data, glb_size);  // 'meta' box at the end
+
+    // Free the GLB data after embedding it
+    free(glb_data);
+
+    return 0;
+}
+
+// Function to create 'hdlr' box (Handler Reference Box)
+static void write_glb_hdlr(AVIOContext *pb)
+{
+
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);                 // size placeholder
+    ffio_wfourcc(pb, "hdlr");
+
+    avio_wb32(pb, 0);                 // version + flags
+    avio_wb32(pb, 0);                 // pre_defined
+    ffio_wfourcc(pb, "gltf");         // handler_type
+
+    avio_wb32(pb, 0);                 // reserved
+    avio_wb32(pb, 0);                 // reserved
+    avio_wb32(pb, 0);                 // reserved
+
+    avio_put_str(pb, "gltf");          //proper C-string (includes '\0')
+
+    update_size(pb, pos);
+}
+
+// Function to create 'iinf' box (Item Info Box)
+static void write_infe(AVIOContext *pb,
+                       uint16_t item_id,
+                       const char *item_name)
+{
+
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "infe");
+
+    /* FullBox: version = 0, flags = 0 */
+    avio_wb32(pb, 0x00000000);
+
+    avio_wb16(pb, item_id);
+    avio_wb16(pb, 0);  // item_protection_index
+
+    /* item_name */
+    avio_put_str(pb, item_name);
+
+    /* content_type */
+    avio_put_str(pb, "model/gltf-binary");
+
+    /* content_encoding */
+    avio_put_str(pb, "binary");
+
+    update_size(pb, pos);
+}
+
+static void write_iinf(AVIOContext *pb,
+                       uint16_t item_id,
+                       const char *item_name)
+{
+
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "iinf");
+
+    avio_wb32(pb, 0);   // version 0
+    avio_wb16(pb, 1);   // entry_count
+
+    write_infe(pb, item_id, item_name);
+
+    update_size(pb, pos);
+}
+
+// Function to create 'pitm' box (Primary Item Box)
+static void write_pitm(AVIOContext *pb, uint16_t item_id)
+{
+
+    avio_wb32(pb, 14);
+    ffio_wfourcc(pb, "pitm");
+    avio_wb32(pb, 0);        // version + flags
+    avio_wb16(pb, item_id);
+}
+
+// Function to create 'iloc' box (Item Location Box)
+static void write_iloc(AVIOContext *pb,
+                       uint16_t item_id,
+                       uint32_t extent_length)
+{
+
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "iloc");
+
+    /* FullBox: version = 1, flags = 0 */
+    avio_wb32(pb, 0x01000000);
+
+    /*
+     * offset_size = 4
+     * length_size = 4
+     * base_offset_size = 4
+     * reserved = 0
+     */
+    avio_w8(pb, 0x44);
+    avio_w8(pb, 0x40);
+
+    avio_wb16(pb, 1);            // item_count
+
+    avio_wb16(pb, item_id);
+    avio_wb16(pb, 1);            // construction_method = 1 (idat-relative)
+    avio_wb16(pb, 0);            // data_reference_index
+
+    avio_wb32(pb, 0);            // base_offset = 0 
+
+    avio_wb16(pb, 1);            // extent_count
+    avio_wb32(pb, 0);            // extent_offset = 0
+    avio_wb32(pb, extent_length);
+
+    update_size(pb, pos);
+}
+
+// Function to create 'meta' box (Meta Box)
+static void write_glb_meta(AVIOContext *pb,
+                           const char *name,
+                           const uint8_t *data,
+                           uint32_t size)
+{
+
+    int64_t meta_pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "meta");
+    avio_wb32(pb, 0); // version + flags
+
+    write_glb_hdlr(pb);
+
+    /* iloc must appear before idat */
+    write_iloc(pb, 1, size);
+
+    write_pitm(pb, 1);
+    write_iinf(pb, 1, name);
+
+    /* idat immediately follows; construction_method=1 makes offsets relative */
+    avio_wb32(pb, size + 8);
+    ffio_wfourcc(pb, "idat");
+    avio_write(pb, data, size);
+
+    update_size(pb, meta_pos);
+}

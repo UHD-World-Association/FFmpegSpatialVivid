@@ -391,6 +391,7 @@ OBJS-$(CONFIG_MOV_MUXER)                 += movenc.o \
                                             movenchint.o mov_chan.o rtp.o \
                                             movenccenc.o movenc_ttml.o rawutils.o \
                                             apv.o dovi_isom.o evc.o cbs.o cbs_av1.o cbs_apv.o
+OBJS-$(CONFIG_HEIC_MUXER)                += movenc.o mov_chan.o
 OBJS-$(CONFIG_MP2_MUXER)                 += rawenc.o
 OBJS-$(CONFIG_MP3_DEMUXER)               += mp3dec.o replaygain.o
 OBJS-$(CONFIG_MP3_MUXER)                 += mp3enc.o rawenc.o id3v2enc.o

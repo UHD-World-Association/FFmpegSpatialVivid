@@ -318,6 +318,13 @@ typedef struct HEIFGrid {
     int nb_tiles;
 } HEIFGrid;
 
+typedef struct IDATInfo {
+    int64_t offset;      // box offset in file
+    uint32_t size;       // box total size
+    uint32_t data_size;  // box data size
+    int64_t data_offset; // data offset in file
+} IDATInfo;
+
 typedef struct MOVContext {
     const AVClass *class; ///< class for private options
     AVFormatContext *fc;
@@ -386,6 +393,9 @@ typedef struct MOVContext {
     int64_t idat_offset;
     int interleaved_read;
     AVDictionary* decryption_keys;
+    IDATInfo *idat_boxes;    // dynamic array to keep all idat
+    int idat_count;          // total idat box number
+    int idat_capacity;       // idat capacity
 } MOVContext;
 
 int ff_mp4_read_descr_len(AVIOContext *pb);

@@ -167,6 +167,8 @@ void avformat_free_context(AVFormatContext *s)
     s->nb_stream_groups = 0;
     s->nb_streams = 0;
 
+    av_freep(&s->glb_filename);
+
     for (unsigned i = 0; i < s->nb_programs; i++) {
         av_dict_free(&s->programs[i]->metadata);
         av_freep(&s->programs[i]->stream_index);
